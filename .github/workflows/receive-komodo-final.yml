@@ -1,0 +1,115 @@
+name: Receive Komodo Final ROM
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/receive-komodo-final.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  receive:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      STAGE_ID: 1cIlg_d-7TGWEMX4dBpToB1WH-zKLXr1h
+      FINAL_NAME: KomodoOS-lavender-2.9.4-RIWUTZ-DIRECT-GBOARD-ONEPLUS-KSUNEXT-FINAL.zip
+      FINAL_SIZE: '933557076'
+      FINAL_SHA256: 2dcda970b349ca7b4bde221931a89ba98bf8efcfd85dea44f366f5fbb834be65
+      TAG: komodo-2.9.4-lavender-riwutz-direct-final
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          python3 -m pip install --quiet gdown
+          command -v gh
+          command -v unzip
+
+      - name: Receive exact final ROM parts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p parts
+          cat > expected.txt <<'EOF'
+          00 94371840 7acdda4c52a5ae079504a167a429f981532e67b37ec21da758bf0b40d53d278b
+          01 94371840 7a5dd2263536cfce4c8ff62dad2468cf8e8921e6cfa163e8d22e6a93a990d158
+          02 94371840 91a80f4f36a7773200c84ce247ac5ccb0696d656076d57e4b41a080f33835a78
+          03 94371840 98b6c1dcbf96264fcb9643c545d3de573dc3e450f7a7fae04d4d8191572ebfec
+          04 94371840 5df7d187854dde593911b23084e232fc1d0138b2136101e51d638a9ed1b1711f
+          05 94371840 34bd9b6f93a3e44348cb68ea2e72b75537744cdede435df4524b338471d1b8b0
+          06 94371840 c514777721e17bca471fa42331e99f5fd117efe9abaec108f4987f66f5b3354c
+          07 94371840 b7c6ef467d47f5c2300e745b48c8732f69b5f5a979e1d64134809492d7c26168
+          08 94371840 9f202b55474784f0fc7ffbe02aec3c79a1b98f38bdd24f8736ab2b1876284d73
+          09 84210516 a4ed1d858cdb087e2e76b89fc81f6986f9be6943f81ce505e3e3379ae1a0155e
+          EOF
+
+          status() {
+            BODY=$(printf 'STATUS=%s\nRUN_ID=%s\nFINAL_SHA256=%s\n' "$1" "$GITHUB_RUN_ID" "$FINAL_SHA256")
+            ENC=$(printf '%s' "$BODY" | base64 -w0)
+            OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/KOMODO_UPLOAD_STATUS.txt?ref=main" --jq .sha 2>/dev/null || true)
+            if [ -n "$OLD" ]; then
+              gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/KOMODO_UPLOAD_STATUS.txt" -f message="Komodo upload $1" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
+            else
+              gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/KOMODO_UPLOAD_STATUS.txt" -f message="Komodo upload $1" -f content="$ENC" -f branch=main >/dev/null
+            fi
+          }
+
+          while read -r IDX SIZE SHA; do
+            status "WAITING_PART_${IDX}"
+            ok=0
+            for n in $(seq 1 240); do
+              rm -f current.part
+              python3 -m gdown "$STAGE_ID" -O current.part >/dev/null 2>&1 || true
+              if [ -s current.part ]; then
+                GOT_SIZE=$(stat -c%s current.part)
+                GOT_SHA=$(sha256sum current.part | awk '{print $1}')
+                if [ "$GOT_SIZE" = "$SIZE" ] && [ "$GOT_SHA" = "$SHA" ]; then
+                  mv current.part "parts/part${IDX}"
+                  status "RECEIVED_PART_${IDX}"
+                  ok=1
+                  break
+                fi
+              fi
+              sleep 5
+            done
+            [ "$ok" = 1 ] || { status "FAILED_PART_${IDX}"; exit 1; }
+          done < expected.txt
+
+          cat parts/part?? > "$FINAL_NAME"
+          [ "$(stat -c%s "$FINAL_NAME")" = "$FINAL_SIZE" ]
+          GOT=$(sha256sum "$FINAL_NAME" | awk '{print $1}')
+          [ "$GOT" = "$FINAL_SHA256" ]
+          unzip -tq "$FINAL_NAME"
+          printf '%s  %s\n' "$FINAL_SHA256" "$FINAL_NAME" > "${FINAL_NAME}.sha256"
+          status "ASSEMBLED_VERIFIED"
+
+      - name: Publish exact final ROM release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > RELEASE_NOTES.md <<EOF
+          # KomodoOS 2.9.4 Lavender RIWUTZ Direct Final
+
+          Exact prebuilt ROM transferred byte-for-byte; no rebuild in GitHub Actions.
+
+          - Redmi Note 7 (lavender)
+          - Android 10
+          - Gboard embedded directly in system image
+          - OnePlus Launcher embedded directly in system image
+          - RIWUTZ 4.4.281 + KernelSU Next v1.1.1 embedded directly in boot.img
+          - Debloat embedded directly in system image
+          - Final SHA256: ${FINAL_SHA256}
+          EOF
+          gh release delete "$TAG" --cleanup-tag -y >/dev/null 2>&1 || true
+          gh release create "$TAG" "$FINAL_NAME" "${FINAL_NAME}.sha256" --title "KomodoOS 2.9.4 Lavender RIWUTZ Direct Final" --notes-file RELEASE_NOTES.md
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          BODY=$(printf 'STATUS=DONE\nRUN_ID=%s\nFINAL_SHA256=%s\nRELEASE_URL=%s\n' "$GITHUB_RUN_ID" "$FINAL_SHA256" "$URL")
+          ENC=$(printf '%s' "$BODY" | base64 -w0)
+          OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/KOMODO_UPLOAD_STATUS.txt?ref=main" --jq .sha 2>/dev/null || true)
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/KOMODO_UPLOAD_STATUS.txt" -f message="Komodo upload DONE" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
