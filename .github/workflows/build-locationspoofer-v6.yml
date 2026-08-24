@@ -1,4 +1,4 @@
-name: Build LocationSpoofer V7 Indonesia Search
+name: Build LocationSpoofer V8 TikTok Fixed
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'LOCATIONSPOOFER_V7_TRIGGER.txt'
+      - 'LOCATIONSPOOFER_V8_TRIGGER.txt'
   workflow_dispatch:
 
 jobs:
@@ -33,8 +33,8 @@ jobs:
       - name: Clone LocationSpoofer v1.11.7
         run: git clone --depth 1 --branch v1.11.7 https://github.com/HuangZhuoRui/LocationSpoofer.git locationspoofer
 
-      - name: Apply V7 Indonesia-only patch
-        run: python3 scripts/patch_locationspoofer_v7_indonesia.py
+      - name: Apply V8 TikTok patch
+        run: python3 scripts/patch_locationspoofer_v8_tiktok.py
 
       - name: Build APK
         working-directory: locationspoofer
@@ -44,14 +44,14 @@ jobs:
 
       - name: Prepare output
         run: |
-          cp locationspoofer/app/build/outputs/apk/debug/app-debug.apk LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V7_INDONESIA.apk
-          sha256sum LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V7_INDONESIA.apk > LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V7_INDONESIA.apk.sha256
+          cp locationspoofer/app/build/outputs/apk/debug/app-debug.apk LocationSpoofer_v1.11.7_NO_API_OSM_V8_TIKTOK_FIXED.apk
+          sha256sum LocationSpoofer_v1.11.7_NO_API_OSM_V8_TIKTOK_FIXED.apk > LocationSpoofer_v1.11.7_NO_API_OSM_V8_TIKTOK_FIXED.apk.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LocationSpoofer-v1.11.7-NO-API-SEARCH-OSM-MAP-V7-INDONESIA
+          name: LocationSpoofer-v1.11.7-NO-API-OSM-V8-TIKTOK-FIXED
           path: |
-            LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V7_INDONESIA.apk
-            LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V7_INDONESIA.apk.sha256
+            LocationSpoofer_v1.11.7_NO_API_OSM_V8_TIKTOK_FIXED.apk
+            LocationSpoofer_v1.11.7_NO_API_OSM_V8_TIKTOK_FIXED.apk.sha256
           retention-days: 7
