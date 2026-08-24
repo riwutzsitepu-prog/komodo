@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/build-locationspoofer-v6.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'LOCATIONSPOOFER_V6_TRIGGER.txt'
   workflow_dispatch:
 
 jobs:
