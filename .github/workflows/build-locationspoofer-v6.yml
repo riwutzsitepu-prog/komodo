@@ -1,0 +1,53 @@
+name: Build LocationSpoofer V6 Map Spacing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-locationspoofer-v6.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Clone LocationSpoofer v1.11.7
+        run: git clone --depth 1 --branch v1.11.7 https://github.com/HuangZhuoRui/LocationSpoofer.git locationspoofer
+
+      - name: Apply V6 patch
+        run: python3 scripts/patch_locationspoofer_v6.py
+
+      - name: Build APK
+        working-directory: locationspoofer
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Prepare output
+        run: |
+          cp locationspoofer/app/build/outputs/apk/debug/app-debug.apk LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V6_SPACING.apk
+          sha256sum LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V6_SPACING.apk > LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V6_SPACING.apk.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocationSpoofer-v1.11.7-NO-API-SEARCH-OSM-MAP-V6-SPACING
+          path: |
+            LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V6_SPACING.apk
+            LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V6_SPACING.apk.sha256
+          retention-days: 7
