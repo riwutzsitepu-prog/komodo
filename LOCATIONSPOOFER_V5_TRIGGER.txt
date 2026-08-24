@@ -1,0 +1,1 @@
+trigger LocationSpoofer V5 OSM map build 2026-08-24
