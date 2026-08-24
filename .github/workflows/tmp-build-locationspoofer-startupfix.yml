@@ -1,0 +1,181 @@
+name: LocationSpoofer NO-API Startup Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/tmp-build-locationspoofer-startupfix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      APK_NAME: LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_STARTUP_FIX.apk
+      STATUS_FILE: LOCATIONSPOOFER_STARTUPFIX_STATUS.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mark started
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY=$(printf 'STATUS=STARTED\nRUN_ID=%s\n' "$GITHUB_RUN_ID")
+          ENC=$(printf '%s' "$BODY" | base64 -w0)
+          OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE?ref=main" --jq .sha 2>/dev/null || true)
+          if [ -n "$OLD" ]; then
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer startup fix STARTED" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
+          else
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer startup fix STARTED" -f content="$ENC" -f branch=main >/dev/null
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Clone source
+        run: git clone --depth 1 --branch v1.11.7 https://github.com/HuangZhuoRui/LocationSpoofer.git locationspoofer
+
+      - name: Patch NO-API search and startup
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          src = Path('locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/ui/screen/SpoofingScreen.kt')
+          text = src.read_text(encoding='utf-8')
+          marker = 'private var cachedPlacesClient:'
+          if marker not in text:
+              raise SystemExit('performPoiSearch marker not found')
+          start = text.index(marker)
+          replacement = r'''fun performPoiSearch(
+              context: android.content.Context,
+              keyword: String,
+              isDomestic: Boolean,
+              onResult: (List<AppPoiItem>) -> Unit
+          ) {
+              if (keyword.isBlank()) {
+                  onResult(emptyList())
+                  return
+              }
+              kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                  try {
+                      val encoded = java.net.URLEncoder.encode(keyword.trim(), "UTF-8")
+                      val url = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=10&addressdetails=1&accept-language=id,en&q=$encoded"
+                      val client = okhttp3.OkHttpClient.Builder()
+                          .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                          .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                          .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                          .build()
+                      val request = okhttp3.Request.Builder()
+                          .url(url)
+                          .header("User-Agent", "LocationSpoofer/1.11.7 (Android; NO-API-SEARCH)")
+                          .header("Accept", "application/json")
+                          .build()
+                      val results = mutableListOf<AppPoiItem>()
+                      client.newCall(request).execute().use { response ->
+                          if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code}")
+                          val array = org.json.JSONArray(response.body?.string().orEmpty())
+                          for (i in 0 until array.length()) {
+                              val obj = array.optJSONObject(i) ?: continue
+                              val lat = obj.optString("lat").toDoubleOrNull() ?: continue
+                              val lng = obj.optString("lon").toDoubleOrNull() ?: continue
+                              val displayName = obj.optString("display_name", "")
+                              val osmName = obj.optString("name", "")
+                              val title = if (osmName.isNotBlank()) osmName else displayName.substringBefore(',').ifBlank { keyword }
+                              results.add(AppPoiItem(title, displayName, lat, lng))
+                          }
+                      }
+                      kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                          if (results.isEmpty()) {
+                              android.widget.Toast.makeText(context, "No search results for: $keyword", android.widget.Toast.LENGTH_SHORT).show()
+                          }
+                          onResult(results)
+                      }
+                  } catch (e: Exception) {
+                      kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                          android.widget.Toast.makeText(context, "Search Error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                          onResult(emptyList())
+                      }
+                  }
+              }
+          }
+          '''
+          src.write_text(text[:start] + replacement + '\n', encoding='utf-8')
+
+          app = Path('locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/LocationApp.kt')
+          a = app.read_text(encoding='utf-8')
+          old = '''        if (!Places.isInitialized()) {
+            Places.initialize(this, BuildConfig.GOOGLE_MAPS_API_KEY)
+        }
+'''
+          if old not in a:
+              raise SystemExit('Google Places startup block not found')
+          a = a.replace(old, '''        // NO-API build: search uses OpenStreetMap/Nominatim.
+        // Do not initialize Google Places with an empty API key.
+''', 1)
+          app.write_text(a, encoding='utf-8')
+
+          gradle = Path('locationspoofer/app/build.gradle.kts')
+          g = gradle.read_text(encoding='utf-8')
+          oldg = 'debug {\n            signingConfig = signingConfigs.getByName("release")'
+          newg = 'debug {\n            signingConfig = signingConfigs.getByName("debug")'
+          if oldg not in g:
+              raise SystemExit('debug signing block not found')
+          gradle.write_text(g.replace(oldg, newg, 1), encoding='utf-8')
+          PY
+
+      - name: Build APK
+        working-directory: locationspoofer
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Prepare output
+        run: |
+          cp locationspoofer/app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+          sha256sum "$APK_NAME" > "${APK_NAME}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocationSpoofer-v1.11.7-NO-API-SEARCH-OSM-STARTUP-FIX
+          path: |
+            ${{ env.APK_NAME }}
+            ${{ env.APK_NAME }}.sha256
+          retention-days: 7
+
+      - name: Mark done
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA=$(sha256sum "$APK_NAME" | awk '{print $1}')
+          BODY=$(printf 'STATUS=DONE\nRUN_ID=%s\nSHA256=%s\n' "$GITHUB_RUN_ID" "$SHA")
+          ENC=$(printf '%s' "$BODY" | base64 -w0)
+          OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE?ref=main" --jq .sha 2>/dev/null || true)
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer startup fix DONE" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
+
+      - name: Mark failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY=$(printf 'STATUS=FAILED\nRUN_ID=%s\n' "$GITHUB_RUN_ID")
+          ENC=$(printf '%s' "$BODY" | base64 -w0)
+          OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE?ref=main" --jq .sha 2>/dev/null || true)
+          if [ -n "$OLD" ]; then
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer startup fix FAILED" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null || true
+          fi
