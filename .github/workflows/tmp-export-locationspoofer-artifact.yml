@@ -1,0 +1,60 @@
+name: Export LocationSpoofer APK Artifact
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/tmp-export-locationspoofer-artifact.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: locationspoofer-v1.11.7-no-api-search-osm
+      APK_NAME: LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM.apk
+      STATUS_FILE: LOCATIONSPOOFER_EXPORT_STATUS.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mark started
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY=$(printf 'STATUS=STARTED\nRUN_ID=%s\n' "$GITHUB_RUN_ID")
+          ENC=$(printf '%s' "$BODY" | base64 -w0)
+          OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE?ref=main" --jq .sha 2>/dev/null || true)
+          if [ -n "$OLD" ]; then
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer export STARTED" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
+          else
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer export STARTED" -f content="$ENC" -f branch=main >/dev/null
+          fi
+
+      - name: Download release APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$APK_NAME"
+          test -s "$APK_NAME"
+          sha256sum "$APK_NAME"
+
+      - name: Upload chat artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocationSpoofer-v1.11.7-NO-API-SEARCH-OSM
+          path: LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Mark done
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA=$(sha256sum "$APK_NAME" | awk '{print $1}')
+          BODY=$(printf 'STATUS=DONE\nRUN_ID=%s\nSHA256=%s\n' "$GITHUB_RUN_ID" "$SHA")
+          ENC=$(printf '%s' "$BODY" | base64 -w0)
+          OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE?ref=main" --jq .sha)
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer export DONE" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
