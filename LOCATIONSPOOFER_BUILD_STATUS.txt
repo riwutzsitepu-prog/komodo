@@ -1,2 +1,4 @@
-STATUS=STARTED
+STATUS=DONE
 RUN_ID=32748026662
+SHA256=b2eb9e66fcdf3b53cac3967b1650dd8e4ac50d71f487494cba41b46225aec83b
+RELEASE_URL=https://github.com/riwutzsitepu-prog/komodo/releases/tag/locationspoofer-v1.11.7-no-api-search-osm
