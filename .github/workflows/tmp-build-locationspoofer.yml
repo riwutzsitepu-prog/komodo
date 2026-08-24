@@ -1,3 +1,4 @@
+# rerun: verified startup fix after crash log
 name: Temporary LocationSpoofer Builder
 
 on:
@@ -122,10 +123,11 @@ jobs:
 '''
           if old not in a:
               raise SystemExit('Places startup block not found')
-          a = a.replace(old, '''        // NO-API build: do not initialize Google Places.
-        // Search is provided by OpenStreetMap/Nominatim.
-''', 1)
+          a = a.replace(old, '''        // NO-API build: Google Places startup disabled.\n''', 1)
+          a = a.replace('import com.google.android.libraries.places.api.Places\n', '')
           app.write_text(a, encoding='utf-8')
+          if 'Places.initialize(' in app.read_text(encoding='utf-8'):
+              raise SystemExit('VALIDATION FAILED: Places.initialize still present')
 
           gradle = Path('locationspoofer/app/build.gradle.kts')
           g = gradle.read_text(encoding='utf-8')
@@ -135,6 +137,11 @@ jobs:
               raise SystemExit('debug signing block not found')
           gradle.write_text(g.replace(oldg, newg, 1), encoding='utf-8')
           PY
+
+      - name: Verify patch
+        run: |
+          ! grep -n "Places.initialize" locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/LocationApp.kt
+          grep -n "nominatim.openstreetmap.org" locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/ui/screen/SpoofingScreen.kt
 
       - name: Build APK
         working-directory: locationspoofer
