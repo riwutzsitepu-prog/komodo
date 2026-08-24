@@ -1,15 +1,10 @@
-# rerun: verified startup fix after crash log
-name: Temporary LocationSpoofer Builder
+name: Build LocationSpoofer NO-GMS OSM Map V5
 
 on:
   push:
     branches: [main]
     paths:
       - '.github/workflows/tmp-build-locationspoofer.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'LOCATIONSPOOFER_TRIGGER.txt'
   workflow_dispatch:
 
 permissions:
@@ -20,8 +15,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      APK_NAME: LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_STARTUP_FIX.apk
-      STATUS_FILE: LOCATIONSPOOFER_BUILD_STATUS.txt
+      APK_NAME: LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM_MAP_V5.apk
+      STATUS_FILE: LOCATIONSPOOFER_V5_STATUS.txt
     steps:
       - uses: actions/checkout@v4
 
@@ -33,9 +28,9 @@ jobs:
           ENC=$(printf '%s' "$BODY" | base64 -w0)
           OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE?ref=main" --jq .sha 2>/dev/null || true)
           if [ -n "$OLD" ]; then
-            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer build STARTED" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer V5 STARTED" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
           else
-            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer build STARTED" -f content="$ENC" -f branch=main >/dev/null
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer V5 STARTED" -f content="$ENC" -f branch=main >/dev/null
           fi
 
       - uses: actions/setup-java@v4
@@ -50,15 +45,16 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;35.0.0"
 
-      - name: Clone source
+      - name: Clone LocationSpoofer v1.11.7
         run: git clone --depth 1 --branch v1.11.7 https://github.com/HuangZhuoRui/LocationSpoofer.git locationspoofer
 
-      - name: Patch NO-API search and startup
+      - name: Patch Search, startup and map renderer
         shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
 
+          # 1) Search -> OpenStreetMap Nominatim
           src = Path('locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/ui/screen/SpoofingScreen.kt')
           text = src.read_text(encoding='utf-8')
           marker = 'private var cachedPlacesClient:'
@@ -83,7 +79,7 @@ jobs:
                           .build()
                       val request = okhttp3.Request.Builder()
                           .url(url)
-                          .header("User-Agent", "LocationSpoofer/1.11.7 (Android; NO-API-SEARCH)")
+                          .header("User-Agent", "LocationSpoofer/1.11.7 (Android; OSM-MAP-NO-API)")
                           .header("Accept", "application/json")
                           .build()
                       val results = mutableListOf<AppPoiItem>()
@@ -115,6 +111,7 @@ jobs:
           '''
           src.write_text(text[:start] + replacement + '\n', encoding='utf-8')
 
+          # 2) Do not initialize Google Places at application startup
           app = Path('locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/LocationApp.kt')
           a = app.read_text(encoding='utf-8')
           old = '''        if (!Places.isInitialized()) {
@@ -123,25 +120,200 @@ jobs:
 '''
           if old not in a:
               raise SystemExit('Places startup block not found')
-          a = a.replace(old, '''        // NO-API build: Google Places startup disabled.\n''', 1)
-          a = a.replace('import com.google.android.libraries.places.api.Places\n', '')
+          a = a.replace(old, '''        // NO-API build: Google Places is intentionally not initialized.\n''', 1)
           app.write_text(a, encoding='utf-8')
-          if 'Places.initialize(' in app.read_text(encoding='utf-8'):
-              raise SystemExit('VALIDATION FAILED: Places.initialize still present')
 
+          # 3) Replace Google/AMap map renderer with native OpenStreetMap (osmdroid)
+          mapfile = Path('locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/ui/components/AppMapView.kt')
+          mapfile.write_text(r'''package com.suseoaa.locationspoofer.ui.components
+
+import android.os.Handler
+import android.os.Looper
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapListener
+import org.osmdroid.events.ScrollEvent
+import org.osmdroid.events.ZoomEvent
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.CustomZoomButtonsController
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polyline
+
+interface AppMapMarker {
+    fun setPosition(lat: Double, lng: Double)
+}
+
+enum class MarkerType { GREEN, RED, ORANGE, DEFAULT }
+
+interface AppMapController {
+    fun clear()
+    fun addPolyline(points: List<Pair<Double, Double>>, colorInt: Int, width: Float)
+    fun addMarker(lat: Double, lng: Double, title: String, type: MarkerType): AppMapMarker
+    fun animateCamera(lat: Double, lng: Double, zoom: Float? = null)
+    fun moveCamera(lat: Double, lng: Double, zoom: Float? = null)
+    val cameraTargetLat: Double?
+    val cameraTargetLng: Double?
+    fun setOnCameraChangeListener(onFinish: (lat: Double, lng: Double) -> Unit)
+    fun disableUiControls()
+}
+
+class OSMMapControllerImpl(private val map: MapView) : AppMapController {
+    override fun clear() {
+        map.overlays.clear()
+        map.invalidate()
+    }
+
+    override fun addPolyline(points: List<Pair<Double, Double>>, colorInt: Int, width: Float) {
+        val line = Polyline().apply {
+            setPoints(points.map { GeoPoint(it.first, it.second) })
+            outlinePaint.color = colorInt
+            outlinePaint.strokeWidth = width
+        }
+        map.overlays.add(line)
+        map.invalidate()
+    }
+
+    override fun addMarker(lat: Double, lng: Double, title: String, type: MarkerType): AppMapMarker {
+        val marker = Marker(map).apply {
+            position = GeoPoint(lat, lng)
+            this.title = title
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+        }
+        map.overlays.add(marker)
+        map.invalidate()
+        return object : AppMapMarker {
+            override fun setPosition(lat: Double, lng: Double) {
+                marker.position = GeoPoint(lat, lng)
+                map.invalidate()
+            }
+        }
+    }
+
+    override fun animateCamera(lat: Double, lng: Double, zoom: Float?) {
+        if (zoom != null) map.controller.setZoom(zoom.toDouble())
+        map.controller.animateTo(GeoPoint(lat, lng))
+    }
+
+    override fun moveCamera(lat: Double, lng: Double, zoom: Float?) {
+        if (zoom != null) map.controller.setZoom(zoom.toDouble())
+        map.controller.setCenter(GeoPoint(lat, lng))
+    }
+
+    override val cameraTargetLat: Double?
+        get() = map.mapCenter?.latitude
+
+    override val cameraTargetLng: Double?
+        get() = map.mapCenter?.longitude
+
+    override fun setOnCameraChangeListener(onFinish: (lat: Double, lng: Double) -> Unit) {
+        val handler = Handler(Looper.getMainLooper())
+        var pending: Runnable? = null
+        fun schedule() {
+            pending?.let { handler.removeCallbacks(it) }
+            val task = Runnable {
+                val p = map.mapCenter
+                onFinish(p.latitude, p.longitude)
+            }
+            pending = task
+            handler.postDelayed(task, 220L)
+        }
+        map.addMapListener(object : MapListener {
+            override fun onScroll(event: ScrollEvent?): Boolean {
+                schedule()
+                return true
+            }
+            override fun onZoom(event: ZoomEvent?): Boolean {
+                schedule()
+                return true
+            }
+        })
+    }
+
+    override fun disableUiControls() {
+        map.zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
+        map.setMultiTouchControls(true)
+        map.setBuiltInZoomControls(false)
+    }
+}
+
+@Composable
+fun AppMapView(
+    isDomestic: Boolean,
+    modifier: Modifier = Modifier,
+    onMapReady: (AppMapController) -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+
+    val mapView = remember {
+        Configuration.getInstance().userAgentValue = context.packageName
+        MapView(context).apply {
+            setTileSource(TileSourceFactory.MAPNIK)
+            setMultiTouchControls(true)
+            setTilesScaledToDpi(true)
+            minZoomLevel = 3.0
+            maxZoomLevel = 20.0
+            zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
+        }
+    }
+
+    DisposableEffect(lifecycle, mapView) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                Lifecycle.Event.ON_DESTROY -> mapView.onDetach()
+                else -> Unit
+            }
+        }
+        lifecycle.addObserver(observer)
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) mapView.onResume()
+        onDispose {
+            lifecycle.removeObserver(observer)
+            mapView.onPause()
+            mapView.onDetach()
+        }
+    }
+
+    AndroidView(
+        factory = {
+            mapView.apply {
+                setOnTouchListener { v, _ ->
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    false
+                }
+                post { onMapReady(OSMMapControllerImpl(this)) }
+            }
+        },
+        modifier = modifier
+    )
+}
+''', encoding='utf-8')
+
+          # 4) Add osmdroid dependency and use normal debug signing for CI build.
           gradle = Path('locationspoofer/app/build.gradle.kts')
           g = gradle.read_text(encoding='utf-8')
+          dep_anchor = '    implementation(libs.okhttp)\n'
+          if 'org.osmdroid:osmdroid-android' not in g:
+              if dep_anchor not in g:
+                  raise SystemExit('dependency anchor not found')
+              g = g.replace(dep_anchor, dep_anchor + '    implementation("org.osmdroid:osmdroid-android:6.1.20")\n', 1)
           oldg = 'debug {\n            signingConfig = signingConfigs.getByName("release")'
           newg = 'debug {\n            signingConfig = signingConfigs.getByName("debug")'
-          if oldg not in g:
-              raise SystemExit('debug signing block not found')
-          gradle.write_text(g.replace(oldg, newg, 1), encoding='utf-8')
+          if oldg in g:
+              g = g.replace(oldg, newg, 1)
+          gradle.write_text(g, encoding='utf-8')
           PY
-
-      - name: Verify patch
-        run: |
-          ! grep -n "Places.initialize" locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/LocationApp.kt
-          grep -n "nominatim.openstreetmap.org" locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/ui/screen/SpoofingScreen.kt
 
       - name: Build APK
         working-directory: locationspoofer
@@ -157,7 +329,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LocationSpoofer-v1.11.7-NO-API-SEARCH-OSM-STARTUP-FIX
+          name: LocationSpoofer-v1.11.7-NO-API-SEARCH-OSM-MAP-V5
           path: |
             ${{ env.APK_NAME }}
             ${{ env.APK_NAME }}.sha256
@@ -172,7 +344,11 @@ jobs:
           BODY=$(printf 'STATUS=DONE\nRUN_ID=%s\nSHA256=%s\n' "$GITHUB_RUN_ID" "$SHA")
           ENC=$(printf '%s' "$BODY" | base64 -w0)
           OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE?ref=main" --jq .sha 2>/dev/null || true)
-          gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer build DONE" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
+          if [ -n "$OLD" ]; then
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer V5 DONE" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null
+          else
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer V5 DONE" -f content="$ENC" -f branch=main >/dev/null
+          fi
 
       - name: Mark failed
         if: failure()
@@ -183,5 +359,7 @@ jobs:
           ENC=$(printf '%s' "$BODY" | base64 -w0)
           OLD=$(gh api "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE?ref=main" --jq .sha 2>/dev/null || true)
           if [ -n "$OLD" ]; then
-            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer build FAILED" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null || true
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer V5 FAILED" -f content="$ENC" -f sha="$OLD" -f branch=main >/dev/null || true
+          else
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_FILE" -f message="LocationSpoofer V5 FAILED" -f content="$ENC" -f branch=main >/dev/null || true
           fi
