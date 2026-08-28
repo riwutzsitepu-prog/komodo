@@ -1,0 +1,162 @@
+name: Build LocationSpoofer NO-API Search
+
+on:
+  push:
+    branches:
+      - locationspoofer-noapi-search
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout build branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Clone LocationSpoofer v1.11.7
+        run: |
+          git clone --depth 1 --branch v1.11.7 https://github.com/HuangZhuoRui/LocationSpoofer.git locationspoofer
+
+      - name: Patch search to OpenStreetMap Nominatim
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          src = Path('locationspoofer/app/src/main/java/com/suseoaa/locationspoofer/ui/screen/SpoofingScreen.kt')
+          text = src.read_text(encoding='utf-8')
+          marker = 'private var cachedPlacesClient:'
+          if marker not in text:
+              raise SystemExit('performPoiSearch marker not found')
+          start = text.index(marker)
+          replacement = r'''fun performPoiSearch(
+              context: android.content.Context,
+              keyword: String,
+              isDomestic: Boolean,
+              onResult: (List<AppPoiItem>) -> Unit
+          ) {
+              if (keyword.isBlank()) {
+                  onResult(emptyList())
+                  return
+              }
+
+              // NO-API search backend: OpenStreetMap Nominatim.
+              // Requests are only sent after the user explicitly presses Search.
+              kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                  try {
+                      val encoded = java.net.URLEncoder.encode(keyword.trim(), "UTF-8")
+                      val url = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=10&addressdetails=1&accept-language=id,en&q=$encoded"
+
+                      val client = okhttp3.OkHttpClient.Builder()
+                          .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                          .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                          .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                          .build()
+
+                      val request = okhttp3.Request.Builder()
+                          .url(url)
+                          .header("User-Agent", "LocationSpoofer/1.11.7 (Android; NO-API-SEARCH)")
+                          .header("Accept", "application/json")
+                          .build()
+
+                      val results = mutableListOf<AppPoiItem>()
+                      client.newCall(request).execute().use { response ->
+                          if (!response.isSuccessful) {
+                              throw java.io.IOException("HTTP ${response.code}")
+                          }
+                          val body = response.body?.string().orEmpty()
+                          val array = org.json.JSONArray(body)
+                          for (i in 0 until array.length()) {
+                              val obj = array.optJSONObject(i) ?: continue
+                              val lat = obj.optString("lat").toDoubleOrNull() ?: continue
+                              val lng = obj.optString("lon").toDoubleOrNull() ?: continue
+                              val displayName = obj.optString("display_name", "")
+                              val osmName = obj.optString("name", "")
+                              val title = if (osmName.isNotBlank()) {
+                                  osmName
+                              } else {
+                                  displayName.substringBefore(',').ifBlank { keyword }
+                              }
+                              results.add(
+                                  AppPoiItem(
+                                      title = title,
+                                      snippet = displayName,
+                                      lat = lat,
+                                      lng = lng
+                                  )
+                              )
+                          }
+                      }
+
+                      kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                          if (results.isEmpty()) {
+                              android.widget.Toast.makeText(
+                                  context,
+                                  "No search results for: $keyword",
+                                  android.widget.Toast.LENGTH_SHORT
+                              ).show()
+                          }
+                          onResult(results)
+                      }
+                  } catch (e: Exception) {
+                      kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                          android.widget.Toast.makeText(
+                              context,
+                              "Search Error: ${e.message}",
+                              android.widget.Toast.LENGTH_LONG
+                          ).show()
+                          onResult(emptyList())
+                      }
+                  }
+              }
+          }
+          '''
+          src.write_text(text[:start] + replacement + '\n', encoding='utf-8')
+
+          gradle = Path('locationspoofer/app/build.gradle.kts')
+          g = gradle.read_text(encoding='utf-8')
+          old = 'debug {\n            signingConfig = signingConfigs.getByName("release")'
+          new = 'debug {\n            signingConfig = signingConfigs.getByName("debug")'
+          if old not in g:
+              raise SystemExit('debug signing block not found')
+          gradle.write_text(g.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Build APK
+        working-directory: locationspoofer
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Prepare output
+        run: |
+          cp locationspoofer/app/build/outputs/apk/debug/app-debug.apk LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM.apk
+          sha256sum LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM.apk | tee LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM.sha256
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocationSpoofer-v1.11.7-NO-API-SEARCH-OSM
+          path: |
+            LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM.apk
+            LocationSpoofer_v1.11.7_NO_API_SEARCH_OSM.sha256
+          if-no-files-found: error
+          retention-days: 7
