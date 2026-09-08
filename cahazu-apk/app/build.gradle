@@ -1,0 +1,22 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.cahazu.email'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.cahazu.email'
+        minSdk 23
+        targetSdk 28
+        versionCode 2
+        versionName '1.1'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
